@@ -1,0 +1,257 @@
+>L.
+*key 1 OSCLI"Memory B "+STR$~memory+" +10000"
+*key 2 CALL MIDIFSrx
+PROCassembly
+END
+  DEFPROCassembly
+  DIM code &1000
+  DIM memory &10000
+  FORpass=0TO3STEP3
+      P%=code
+ 
+      [
+      OPT pass
+ 
+ 
+    .MIDIFSrx
+      STMFD (13)!,{R0-R12,14}       \ push everything onto the stack
+    .MIDIFSrx_loop
+      BL MIDIFSrx_WaitForEx
+      BL MIDIFSrx_ReadInExHeader
+      CMP R0,#&F7
+      BEQ MIDIFSrx_Exit
+      BL KorgM1rx_DecodeHeader
+      CMP R0,#&FF
+      BEQ MIDIFSrx_loop
+      CMP R0,#&F7
+      BEQ MIDIFSrx_Exit
+      BL MIDIFSrx_Decode
+      LDMFD (13)!,{R0-R12,15}
+    .MIDIFSrx_Exit
+      LDMFD (13)!,{R0-R12,15}
+ 
+ 
+
+
+    .MIDIFS_RxWaitForExclusive
+      STMFD (13)!,{14}
+      SWI "MIDI_TxStart"
+    .MIDIFSrx_WaitForEx_Loop
+      SWI "OS_ReadEscapeState"    
+      BCS MIDIFSrx_WaitForEx_Exit
+      SWI "MIDI_RxByte"            
+      CMP R0,#&F0                   
+      BNE MIDIFSrx_WaitForEx_Loop        
+    .MIDIFSrx_WaitForEx_Exit
+      LDMFD (13)!,{15}
+ 
+
+
+    .MIDIFS_RawRxData1
+
+      \ On entry:
+      \ R0=address to where header is to be read
+      \ R1=no. bytes to be read in
+
+      \ R0,R1 are used for SWI calls
+      \ R2=counts the size of the rx MIDI data
+      \ R3=the base address for where the rx MIDI data starts
+
+      STMFD (13)!,{14}
+      MOV R3,R0
+      MOV R2,R1
+    .MIDIFS_RawRxData1_Loop
+      BL MIDIFSrx_rxbyte
+      STRB R0,[R3,R2]
+      CMP R0,#&F7
+      BEQ MIDIFS_RawRxData1_Exit
+      SUB R2,R2,#1                 
+      CMP R2,#0
+      BNE MIDIFS_RawRxData1_Loop
+    .MIDIFS_RawRxData1_Exit
+      MOV R0,R3
+      LDMFD (13)!,{15}
+  
+
+
+                            
+    .MIDIFS_RawRxData2
+      STMFD (13)!,{14}
+      MOV R3,R0
+      MOV R2,R1     
+    .MIDIFS_RawRxData2_Loop
+      BL MIDIFSrx_rxbyte
+      STRB R0,[R3,R2]
+      CMP R0,#&F7
+      BNE MIDIFS_RawRxData2_Loop
+    .MIDIFS_RawRxData2_Exit
+      LDMFD (13)!,{15}
+
+
+
+    .MIDIFS_CheckList
+
+      / On Entry-
+      / R0=byte to be searched for in list
+      / whose address is held in R1
+      / R2 will contain each byte from list
+      / to be compared with R0
+      / R3 is length of list in bytes
+      / and is also a descending counter
+                                   
+      STMFD (13)!,{R2,R3,R14}
+    .MIDIFS_CheckList_Loop
+      SUB R3,R3,#1  
+      LDRB R2,[R1,R3]
+      CMP R2,R0
+      BEQ MIDIFS_CheckList_Exit 
+      CMP R3,#0
+      BEQ MIDIFS_CheckList_NotFound
+      B MIDIFS_CheckList_Loop
+    .MIDIFS_CheckList_Found
+      ADD R3,R3,#1      
+      / If byte not found in list, then R0=0.     
+    .MIDIFS_CheckList_NotFound
+      MOV R0,R3
+      / If byte found, R0=position of byte in table
+      LDMFD (13)!,{R2,R3,15}
+
+
+
+ 
+    .MIDIFS_KorgM1_RxBuildHeader
+ 
+          
+
+      / On Entry-
+      / R0=base address of header
+
+
+
+      STMFD (13)!,{14}
+
+
+      BL MIDIFS_RawRx1
+
+
+      MOV R3,R0
+      MOV R0,#0
+      LDRB R0,[R3,#2]               \ Extract MIDI source channel
+      EOR R0,R0,#&30                \ from 2nd byte of header
+      ADD R0,R0,#1                  \ and store it at MIDIchannel
+      STRB R0,MIDIchannel           \
+
+
+
+      BL MIDIFS_CheckList
+      CMP R0,#0
+      BEQ MIDIFS_KorgM1_RxBuildHeader_Exit
+      CMP R0
+
+
+      BL MIDIFSrx_rxbyte
+      STRB R0,MIDIFSrx_MessageType
+      STRB R0,[R3,R2]
+      ADD R2,R2,#1
+      LDR R4,MIDIFS_KorgM1_MTable    \ R5=Address of M1 message table
+ 
+ 
+ 
+    .MIDIFS_RxAndDecode
+ 
+      \ MIDIFSrx_Decode register assignments
+      \ ----------------------------
+      \ R0,R1 used in SWI calls
+      \ R2=used for decoding rx message
+      \ R3=used as a counter to the size of the message
+      \ R5=is a copy of rx byte used for decoding
+      \ R7=used in decoding
+ 
+      STMFD (13)!,{14}
+    .MIDIFSrx_Decode_Loop1
+ 
+      BL MIDIFSrx_rxbyte
+      CMP R0,#&F0
+      BGE MIDIFSrx_DecodeExit
+      MOV R5,R0                     \ R5=R0 (R5=copy of rx byte)
+      MOV R2,#1
+      MOV R3,#0                     \ R3=0
+      \ The first byte in 8 is in R5, this byte contains all the 7th bits
+      \ for the next 7 bytes.
+      \ The next 7 bytes will each in occur in R0.
+ 
+    .MIDIFSrx_Decode_Loop2
+ 
+ 
+      BL MIDIFSrx_rxbyte
+      CMP R0,#&F0
+      BGE MIDIFSrx_DecodeExit
+ 
+      AND R7,R5,R2, LSL R3          \ R7=R5 AND R2 << R3
+      CMP R7,#0                     \ Is R7=R2 >> R3 (ie. was bit 7 set?)
+      ADDNE R0,R0,#128              \ If yes then set bit 7 of rx byte
+      STRB R0,[R4,R3]               \ Store rx byte in address R4+R3
+ 
+      ADD R3,R3,#1                  \ R3=R3+1
+      CMP R3,#7                     \ R3=6? (i.e. 7 bytes done)
+      BNE MIDIFSrx_Decode_Loop2
+      ADD R4,R4,R3
+      B MIDIFSrx_Decode_Loop1
+ 
+    .MIDIFSrx_DecodeEOX
+      STRB R0,[R4]
+      STR R4,MIDIdataend
+    .MIDIFSrx_DecodeExit
+      SWI "MIDI_TxStop"
+      LDMFD (13)!,{15}
+ 
+ 
+    .MIDIFS_RxByte
+      STMFD (13)!,{14}
+    .MIDIFSrx_rxbyte_loop
+      MOV R0,#&F7
+      SWI "OS_ReadEscapeState"
+      BCS MIDIFSrx_rxbyte_exit
+      SWI "MIDI_RxByte"
+      CMP R1,#0
+      BEQ MIDIFSrx_rxbyte_loop
+    .MIDIFSrx_rxbyte_exit
+      LDMFD (13)!,{15}
+ 
+   .KorgM1rx_AllHeader
+      STMFD (13)!,{14}
+      BL MIDIFSrx_rxbyte
+      STRB R0,[R4,R3]
+      ADD R3,R3,#1
+      LDMFD (13)!,{15}
+ 
+    .MIDIdatastart EQUD memory
+    .MIDIdataend EQUD 0
+ 
+    .MIDIword
+    .MIDItx_word
+    .MIDIword_status EQUB 0
+    .MIDIword_databyte1 EQUB 0
+    .MIDIword_databyte2 EQUB 0
+    .MIDIword_bytes EQUB 0
+    .MIDIFSrx_EscapeOccured EQUB 0
+    .M1_HeaderType EQUB 0
+      ALIGN
+ 
+    ALIGN
+    .MIDIchannel EQUB 0
+    .MIDIFSrx_MessageType
+      EQUB 0
+      ALIGN
+    .MIDI_M1_Message_Type
+    .MIDIFS_KorgM1_BankedData_1to5
+      EQUD &50484D4C
+      EQUB &51
+    .MIDIFS_KorgM1_NonBankedData_6to7
+      EQUW &4940
+    .MIDIFS_KorgM1_MTable EQUD MIDI_M1_Message_Type
+      ALIGN
+    ]
+  NEXT
+  ENDPROC
+>*SPPOOL
